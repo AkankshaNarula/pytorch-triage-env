@@ -1,0 +1,10 @@
+name: pytorch_triage_env
+version: "1.0.0"
+description: >
+  A PyTorch training infrastructure triage environment. An LLM agent
+  acts as a Staff ML Engineer debugging real production training failures:
+  computation graph memory leaks, FSDP collective deadlocks, torch.compile
+  graph breaks, and DDP gradient synchronization hangs. The agent reads
+  virtual files, edits code, runs mock training (generating authentic
+  PyTorch error traces), and submits a verified fix with explanation.
+  Implements RFC 004 LLMJudge rubric for understanding-based scoring.

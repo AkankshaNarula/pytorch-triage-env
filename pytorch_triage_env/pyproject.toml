@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pytorch-triage-env"
+version = "1.0.0"
+description = "PyTorch Training Infrastructure Triage RL Environment for OpenEnv"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.5.0",
+    "openenv-core>=0.2.0",
+    "websockets>=12.0",
+    "httpx>=0.25.0",
+    "openai>=1.0.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+server = "pytorch_triage_env.server.app:main"
+pytorch-triage-env = "pytorch_triage_env.server.app:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pytorch_triage_env*"]
