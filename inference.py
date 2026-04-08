@@ -84,9 +84,9 @@ class _HTTPEnvClient:
 # ── Config ────────────────────────────────────────────────────────────────────
 
 IMAGE_NAME    = os.getenv("IMAGE_NAME")
-API_KEY       = os.getenv("API_KEY") or os.getenv("HF_TOKEN")
-API_BASE_URL  = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME    = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+API_KEY       = os.environ["API_KEY"]   # injected by validator — do NOT fall back to HF_TOKEN
+API_BASE_URL  = os.environ["API_BASE_URL"]  # injected by validator — do NOT use default
+MODEL_NAME    = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")  # validator may inject this
 ENV_URL       = os.getenv("ENV_URL", "http://localhost:7860")
 BENCHMARK     = "pytorch_triage_env"
 SUCCESS_THRESHOLD = 0.50
