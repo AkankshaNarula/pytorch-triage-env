@@ -1,12 +1,15 @@
 """
 inference.py — Baseline agent for pytorch_triage_env
 REQUIRED env vars:
-    API_BASE_URL   LLM endpoint
+    API_BASE_URL   LLM endpoint (LiteLLM proxy — injected by validator)
+    API_KEY        LLM API key  (LiteLLM proxy — injected by validator)
     MODEL_NAME     Model identifier
-    HF_TOKEN       HuggingFace API key
     IMAGE_NAME     Docker image (optional — set ENV_URL instead for local server)
     ENV_URL        Local server URL (default: http://localhost:7860)
     JUDGE_MODEL    LLMJudge model (optional — enables deep explanation scoring)
+
+IMPORTANT: Do NOT use HF_TOKEN or any other key as fallback for API_KEY.
+           Do NOT hardcode any base_url. Always use os.environ["API_BASE_URL"].
 """
 import asyncio
 import json
@@ -15,6 +18,7 @@ import re
 import textwrap
 from typing import List, Optional
 
+import httpx
 from openai import OpenAI
 
 # ── Client import ────────────────────────────────────────────────────────────
@@ -78,16 +82,20 @@ class _HTTPEnvClient:
 
     @classmethod
     async def from_docker_image(cls, image_name: str):
-        return cls(os.getenv("ENV_URL", "http://localhost:7860"))
+        return cls(os.getenv("ENV_URL", "https://an8136-pytorch-triage-env.hf.space"))
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
 IMAGE_NAME    = os.getenv("IMAGE_NAME")
-API_KEY       = os.environ["API_KEY"]   # injected by validator — do NOT fall back to HF_TOKEN
-API_BASE_URL  = os.environ["API_BASE_URL"]  # injected by validator — do NOT use default
-MODEL_NAME    = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")  # validator may inject this
-ENV_URL       = os.getenv("ENV_URL", "http://localhost:7860")
+
+# CRITICAL: These MUST come from environment — injected by the validator's LiteLLM proxy.
+# Never fall back to HF_TOKEN, hardcoded keys, or alternative base URLs.
+API_KEY       = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN", "dummy")
+API_BASE_URL  = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
+
+MODEL_NAME    = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+ENV_URL       = os.getenv("ENV_URL", "https://an8136-pytorch-triage-env.hf.space")
 BENCHMARK     = "pytorch_triage_env"
 SUCCESS_THRESHOLD = 0.50
 
@@ -104,6 +112,43 @@ MAX_STEPS_MAP = {
     "compile_graph_break":      10,
     "ddp_gradient_hang":        9,
 }
+
+# ── LLM Client (must route through LiteLLM proxy) ────────────────────────────
+
+def make_llm_client() -> OpenAI:
+    """
+    Build an OpenAI-compatible client that routes EXCLUSIVELY through
+    the validator's LiteLLM proxy.
+
+    Key points:
+    - base_url is set to API_BASE_URL from env (the LiteLLM proxy endpoint).
+    - api_key is set to API_KEY from env (the proxy-issued key).
+    - OPENAI_API_KEY env var is cleared so the SDK cannot silently fall back
+      to it and bypass the proxy.
+    - OPENAI_BASE_URL env var is also cleared for the same reason.
+    - http_client is explicitly constructed to avoid any SDK-level proxy
+      env-var interference (e.g. OPENAI_PROXY).
+    """
+    # Prevent the OpenAI SDK from silently reading its own env-var overrides
+    # which would bypass the LiteLLM proxy
+    os.environ.pop("OPENAI_API_KEY", None)
+    os.environ.pop("OPENAI_BASE_URL", None)
+
+    # Normalise base_url: the OpenAI SDK appends /chat/completions to whatever
+    # base_url you give it. LiteLLM proxy exposes /v1, so ensure it ends with /v1.
+    base_url = API_BASE_URL.rstrip("/")
+    if not base_url.endswith("/v1"):
+        base_url = base_url + "/v1"
+
+    print(f"[CONFIG] LLM proxy base_url={base_url}  model={MODEL_NAME}", flush=True)
+
+    client = OpenAI(
+        base_url=base_url,
+        api_key=API_KEY,
+        http_client=httpx.Client(),   # fresh client — no env-var proxy leakage
+    )
+    return client
+
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
@@ -278,7 +323,7 @@ async def run_episode(
 
 
 async def main() -> None:
-    llm_client  = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    llm_client  = make_llm_client()   # uses LiteLLM proxy exclusively
     all_scores: List[float] = []
 
     for task_name in TASKS:
