@@ -18,7 +18,6 @@ import re
 import textwrap
 from typing import List, Optional
 
-import httpx
 from openai import OpenAI
 
 # ── Client import ────────────────────────────────────────────────────────────
@@ -87,15 +86,13 @@ class _HTTPEnvClient:
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-# ── Exactly as the pre-submission checklist requires ─────────────────────────
+# ── Config — follow error message exactly ────────────────────────────────────
 API_BASE_URL     = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME       = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
-HF_TOKEN         = os.getenv("HF_TOKEN")          # NO default — validator injects this
-LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")  # optional Docker image name
-
-# Aliases kept for backward compat with rest of the file
-IMAGE_NAME = LOCAL_IMAGE_NAME or os.getenv("IMAGE_NAME")
-ENV_URL    = os.getenv("ENV_URL", "https://an8136-pytorch-triage-env.hf.space")
+API_KEY          = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN")  # validator injects API_KEY
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
+IMAGE_NAME       = LOCAL_IMAGE_NAME or os.getenv("IMAGE_NAME")
+ENV_URL          = os.getenv("ENV_URL", "https://an8136-pytorch-triage-env.hf.space")
 BENCHMARK     = "pytorch_triage_env"
 SUCCESS_THRESHOLD = 0.50
 
@@ -116,38 +113,9 @@ MAX_STEPS_MAP = {
 # ── LLM Client (must route through LiteLLM proxy) ────────────────────────────
 
 def make_llm_client() -> OpenAI:
-    """
-    Build an OpenAI-compatible client that routes EXCLUSIVELY through
-    the validator's LiteLLM proxy.
-
-    Key points:
-    - base_url is set to API_BASE_URL from env (the LiteLLM proxy endpoint).
-    - api_key is set to API_KEY from env (the proxy-issued key).
-    - OPENAI_API_KEY env var is cleared so the SDK cannot silently fall back
-      to it and bypass the proxy.
-    - OPENAI_BASE_URL env var is also cleared for the same reason.
-    - http_client is explicitly constructed to avoid any SDK-level proxy
-      env-var interference (e.g. OPENAI_PROXY).
-    """
-    # Prevent the OpenAI SDK from silently reading its own env-var overrides
-    # which would bypass the LiteLLM proxy
-    os.environ.pop("OPENAI_API_KEY", None)
-    os.environ.pop("OPENAI_BASE_URL", None)
-
-    # Normalise base_url: the OpenAI SDK appends /chat/completions to whatever
-    # base_url you give it. LiteLLM proxy exposes /v1, so ensure it ends with /v1.
-    base_url = API_BASE_URL.rstrip("/")
-    if not base_url.endswith("/v1"):
-        base_url = base_url + "/v1"
-
-    print(f"[CONFIG] LLM proxy base_url={base_url}  model={MODEL_NAME}", flush=True)
-
-    client = OpenAI(
-        base_url=base_url,
-        api_key=HF_TOKEN,   # validator injects HF_TOKEN as the proxy key
-        http_client=httpx.Client(),   # fresh client — no env-var proxy leakage
-    )
-    return client
+    """Simple OpenAI client using validator-injected API_BASE_URL and API_KEY."""
+    print(f"[CONFIG] base_url={API_BASE_URL}  model={MODEL_NAME}  key_set={bool(API_KEY)}", flush=True)
+    return OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
