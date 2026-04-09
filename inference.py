@@ -87,15 +87,15 @@ class _HTTPEnvClient:
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-IMAGE_NAME    = os.getenv("IMAGE_NAME")
+# ── Exactly as the pre-submission checklist requires ─────────────────────────
+API_BASE_URL     = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME       = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+HF_TOKEN         = os.getenv("HF_TOKEN")          # NO default — validator injects this
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")  # optional Docker image name
 
-# CRITICAL: These MUST come from environment — injected by the validator's LiteLLM proxy.
-# Never fall back to HF_TOKEN, hardcoded keys, or alternative base URLs.
-API_KEY       = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN", "dummy")
-API_BASE_URL  = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
-
-MODEL_NAME    = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
-ENV_URL       = os.getenv("ENV_URL", "https://an8136-pytorch-triage-env.hf.space")
+# Aliases kept for backward compat with rest of the file
+IMAGE_NAME = LOCAL_IMAGE_NAME or os.getenv("IMAGE_NAME")
+ENV_URL    = os.getenv("ENV_URL", "https://an8136-pytorch-triage-env.hf.space")
 BENCHMARK     = "pytorch_triage_env"
 SUCCESS_THRESHOLD = 0.50
 
@@ -144,7 +144,7 @@ def make_llm_client() -> OpenAI:
 
     client = OpenAI(
         base_url=base_url,
-        api_key=API_KEY,
+        api_key=HF_TOKEN,   # validator injects HF_TOKEN as the proxy key
         http_client=httpx.Client(),   # fresh client — no env-var proxy leakage
     )
     return client
