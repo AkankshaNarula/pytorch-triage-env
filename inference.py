@@ -194,49 +194,50 @@ def warmup_env(url: str, max_wait: int = 120, poll_interval: int = 6) -> bool:
 # ── Prompts ────────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = textwrap.dedent("""
-    You are a Staff ML Infrastructure Engineer at a major AI lab.
-    You are debugging a failing PyTorch training run.
-    You have access to a virtual workspace. Use the tools to triage and fix the bug.
+    You are a Staff ML Infrastructure Engineer debugging a failing PyTorch training run.
+    You have a virtual workspace with files you can read, edit, and run.
 
-    AVAILABLE ACTIONS (respond with ONLY a JSON object):
+    AVAILABLE ACTIONS — respond with ONLY a valid JSON object, no prose:
 
-    Read a file:
-    {"action_type": "read_file", "filename": "train.py"}
+      {"action_type": "read_file", "filename": "train.py"}
 
-    Edit a file (old_str must EXACTLY match file content — copy verbatim):
-    {"action_type": "edit_file", "filename": "train.py", "old_str": "...", "new_str": "..."}
+      {"action_type": "edit_file", "filename": "train.py", "old_str": "<exact match>", "new_str": "<replacement>"}
 
-    Run a command (python train.py, torchrun ..., TORCH_LOGS=dynamo python train.py, etc.):
-    {"action_type": "execute_bash", "command": "python train.py"}
+      {"action_type": "execute_bash", "command": "python train.py"}
 
-    View your changes:
-    {"action_type": "view_git_diff", "filename": null}
+      {"action_type": "view_git_diff", "filename": null}
 
-    Submit final fix (REQUIRED: deep explanation of root cause, not just what you changed):
-    {"action_type": "submit_fix", "explanation": "The root cause is X because Y. The fix works because Z. To prevent this class of bug in future, W."}
+      {"action_type": "submit_fix", "explanation": "<deep technical explanation>"}
 
-    WORKFLOW:
-    1. execute_bash to see the error
-    2. read_file to understand the bug
-    3. edit_file to apply the fix
-    4. execute_bash to verify the fix works
-    5. submit_fix with a technically deep explanation
+    RULES — you MUST follow these:
+    - old_str in edit_file must be an EXACT verbatim substring of the current file — copy it character-for-character.
+    - Do NOT call read_file or execute_bash more than twice in a row. If you have seen the error and read the file, you MUST attempt edit_file next.
+    - Once run_status is "passing", call submit_fix immediately.
+    - If budget_remaining <= 2, call submit_fix NOW regardless of status.
+    - Never repeat the same action twice consecutively.
 
-    The explanation is evaluated by an LLM judge. "I changed X to Y" scores 0.3.
-    "The root cause is A because B, and the fix works because C" scores 1.0.
+    SCORING — your submit_fix explanation is judged by an LLM:
+    - "I changed X to Y" → 0.3 (very low)
+    - "Root cause is X because <mechanism>" → 0.7
+    - "Root cause + why it manifests + why fix works + how to prevent" → 1.0
 
-    Respond ONLY with the JSON object. No prose.
+    Respond with ONLY the JSON object. No markdown fences. No prose.
 """).strip()
 
 
-def build_prompt(obs) -> str:
-    files_listing = "\n".join(
-        f"  {fname}: {len(content)} chars"
-        for fname, content in (getattr(obs, "current_files", None) or {}).items()
-    )
+def build_first_prompt(obs) -> str:
+    """Full context prompt for the first step of an episode."""
+    files = getattr(obs, "current_files", None) or {}
+    # Include actual file content (truncated) so LLM can form edit_file old_str immediately
+    files_block = ""
+    for fname in ["train.py", "model.py", "config.py", "data_loader.py"]:
+        content = files.get(fname, "")
+        if content:
+            files_block += f"\n=== {fname} ===\n{content[:3000]}\n"
+
     hint_block = ""
     if getattr(obs, "hint", None):
-        hint_block = f"\nHINT (after multiple failed runs): {obs.hint}\n"
+        hint_block = f"\n⚠️ HINT: {obs.hint}\n"
 
     return textwrap.dedent(f"""
         TASK: {getattr(obs, 'task_name', '')}
@@ -245,47 +246,128 @@ def build_prompt(obs) -> str:
         INCIDENT REPORT:
         {getattr(obs, 'task_description', '')}
 
-        WORKSPACE:
-        {files_listing}
-        {hint_block}
-        INSTRUCTIONS:
+        STRATEGY:
         {getattr(obs, 'instructions', '')}
 
+        CURRENT FILES:
+        {files_block}
+        {hint_block}
         LAST OUTPUT:
-        {getattr(obs, 'terminal_output', '(none)')[:2000]}
+        {getattr(obs, 'terminal_output', '(none)')[:1500]}
 
+        Decide your first action. The files are shown above — you already have their content.
+        Go straight to execute_bash to see the live error, then edit_file to fix it.
+        Reply with ONLY a JSON object.
+    """).strip()
+
+
+def build_step_prompt(obs, actions_taken: list) -> str:
+    """Compact follow-up prompt — includes last output and anti-loop directive."""
+    budget = getattr(obs, "budget_remaining", 9)
+    run_status = getattr(obs, "run_status", "not_run")
+    step = getattr(obs, "step_number", 0)
+    max_steps = getattr(obs, "max_steps", 9)
+
+    # Anti-loop directive
+    directive = ""
+    if budget <= 2:
+        directive = "\n🚨 BUDGET CRITICAL: Call submit_fix NOW. Do not take any other action.\n"
+    elif run_status == "passing":
+        directive = "\n✅ Run is PASSING. Call submit_fix NOW with a deep technical explanation.\n"
+    elif len(actions_taken) >= 2:
+        last_two = [a.get("action_type") for a in actions_taken[-2:]]
+        if last_two[0] == last_two[1]:
+            directive = f"\n⚠️ You repeated '{last_two[0]}' twice. You MUST use a DIFFERENT action now. If you have read the file and seen the error, use edit_file to apply the fix.\n"
+        elif all(a in ("execute_bash", "read_file") for a in last_two):
+            directive = "\n⚠️ You have run and read the code. Stop exploring — use edit_file to apply the fix NOW.\n"
+
+    hint_block = ""
+    if getattr(obs, "hint", None):
+        hint_block = f"\n⚠️ HINT: {obs.hint}\n"
+
+    # Show current file content if we're mid-episode and haven't edited yet
+    files_block = ""
+    action_types_taken = [a.get("action_type") for a in actions_taken]
+    if "edit_file" not in action_types_taken and step <= 4:
+        files = getattr(obs, "current_files", None) or {}
+        for fname in ["train.py", "model.py"]:
+            content = files.get(fname, "")
+            if content:
+                files_block += f"\n=== {fname} (current) ===\n{content[:2000]}\n"
+
+    return textwrap.dedent(f"""
+        STEP: {step}/{max_steps} | BUDGET: {budget} | STATUS: {run_status}
+        ACTIONS TAKEN SO FAR: {[a.get('action_type') for a in actions_taken]}
+        {directive}{hint_block}
+        LAST OUTPUT:
+        {getattr(obs, 'terminal_output', '(none)')[:1500]}
+        {files_block}
         What is your next action? Reply with ONLY a JSON object.
     """).strip()
 
 
-def get_action(client: OpenAI, obs) -> dict:
+def _parse_action(text: str) -> Optional[dict]:
+    text = re.sub(r"^```(?:json)?\s*", "", text.strip())
+    text = re.sub(r"\s*```$", "", text)
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group())
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+def get_action(client: OpenAI, obs, history: list, actions_taken: list) -> dict:
+    """
+    Multi-turn conversation: history accumulates user/assistant turns so the
+    LLM remembers what it has already read and done.
+    """
+    # Build the user message for this turn
+    if not actions_taken:
+        user_msg = build_first_prompt(obs)
+    else:
+        user_msg = build_step_prompt(obs, actions_taken)
+
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [
+        {"role": "user", "content": user_msg}
+    ]
+
     try:
         resp = client.chat.completions.create(
             model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": build_prompt(obs)},
-            ],
+            messages=messages,
             temperature=0.2,
-            max_tokens=600,
+            max_tokens=800,
         )
         text = (resp.choices[0].message.content or "").strip()
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$",          "", text)
-        m = re.search(r"\{.*?\}", text, re.DOTALL)
-        if m:
-            return json.loads(m.group())
-        print(f"[DEBUG] Could not parse JSON from LLM response: {text[:200]}", flush=True)
+        action = _parse_action(text)
+        if action:
+            # Append this turn to history for next call
+            history.append({"role": "user",      "content": user_msg})
+            history.append({"role": "assistant",  "content": text})
+            return action
+        print(f"[DEBUG] Could not parse JSON from: {text[:200]}", flush=True)
     except Exception as exc:
         print(f"[DEBUG] LLM call failed: {exc}", flush=True)
-    return {
-        "action_type": "submit_fix",
-        "explanation": (
-            "Fallback submission — LLM response could not be parsed. "
-            "The root cause is likely a computation graph retention issue "
-            "or a misconfigured distributed training collective operation."
-        ),
-    }
+
+    # Fallback
+    budget = getattr(obs, "budget_remaining", 0)
+    run_status = getattr(obs, "run_status", "not_run")
+    if run_status == "passing" or budget <= 1:
+        return {
+            "action_type": "submit_fix",
+            "explanation": (
+                "Fallback submission — LLM response could not be parsed. "
+                "The root cause is likely a computation graph retention issue "
+                "or a misconfigured distributed training collective operation."
+            ),
+        }
+    # If we haven't read the file yet, do that
+    action_types = [a.get("action_type") for a in actions_taken]
+    if "read_file" not in action_types:
+        return {"action_type": "read_file", "filename": "train.py"}
+    return {"action_type": "execute_bash", "command": "python train.py"}
 
 
 # ── Logging (mandatory format) ─────────────────────────────────────────────────
@@ -329,14 +411,16 @@ async def run_episode(
     max_steps    = MAX_STEPS_MAP.get(task_name, 9)
 
     try:
-        result = await env_client.reset(task=task_name)
-        obs    = result.observation
+        result        = await env_client.reset(task=task_name)
+        obs           = result.observation
+        history: list = []        # multi-turn conversation history
+        actions_taken: list = []  # list of action dicts taken this episode
 
         for step in range(1, max_steps + 1):
             if result.done:
                 break
 
-            action_dict = get_action(llm_client, obs)
+            action_dict = get_action(llm_client, obs, history, actions_taken)
             action_str  = json.dumps(action_dict).replace('"', "'")[:120]
 
             try:
@@ -352,6 +436,7 @@ async def run_episode(
                 error  = str(ex)[:80]
                 print(f"[DEBUG] step() failed: {ex}", flush=True)
 
+            actions_taken.append(action_dict)
             rewards.append(reward)
             steps_taken = step
             log_step(step, action_str, reward, done, error)
