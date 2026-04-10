@@ -318,6 +318,45 @@ The system prompt guides the LLM through a `execute_bash → read_file → edit_
 
 ---
 
+## Baseline Scores
+
+Scores measured by running the oracle (optimal) agent locally against the mock environment. The oracle takes the known-correct fix actions for each task in minimal steps.
+
+| Task | Difficulty | Max Steps | Oracle Steps | Oracle Score | Fix Verified |
+|------|-----------|-----------|-------------|-------------|-------------|
+| `oom_graph_leak` | Easy | 8 | 5 | **0.999** | ✅ |
+| `fsdp_collective_deadlock` | Medium | 9 | 5 | **0.999** | ✅ |
+| `compile_graph_break` | Medium | 10 | 6 | **0.999** | ✅ |
+| `ddp_gradient_hang` | Hard | 9 | 6 | **0.999** | ✅ |
+| **Mean** | | | **5.5** | **0.999** | |
+
+> **Oracle score** = perfect agent that knows the exact fix. A real LLM agent (Phase 2 evaluation) is expected to score lower due to exploration steps, imprecise edits, and explanation quality variance.
+
+### Phase 2 Evaluation — What the judges run
+
+In Phase 2, the hackathon judges run a **standard Open LLM agent** (e.g. Nemotron Super 49B) against your environment with no task-specific tuning. Your environment needs to be solvable by a general-purpose agent, not just your own baseline.
+
+**How to simulate Phase 2 locally** — swap `MODEL_NAME` for any model the judge might use:
+
+```bash
+export HF_TOKEN=hf_yourtoken
+export MODEL_NAME=nvidia/Llama-3_1-Nemotron-51B-Instruct   # judge's model
+export ENV_URL=http://localhost:7860
+
+python inference.py
+```
+
+**What makes an environment score well in Phase 2:**
+- The LLM can read the error trace and understand what's wrong (clear `task_description` + authentic traces)
+- The file edit `old_str` is a short, unambiguous, exact-match string (easier for an LLM to quote correctly)
+- After a correct fix, `run_status` flips to `passing` immediately (clear reward signal)
+- The `hint` field (appears after 3 failed runs) guides a stuck agent toward the fix
+- `submit_fix` explanations are scored on depth — a brief explanation still gets partial credit (0.3+)
+
+**Expected Phase 2 score range** (general LLM, no fine-tuning): `0.40 – 0.75` per task depending on model reasoning quality. The gap between oracle (0.999) and a general agent represents the exploration + explanation quality challenge.
+
+---
+
 ## Live Demo
 
 🤗 **HuggingFace Space**: [https://huggingface.co/spaces/an8136/pytorch-triage-env](https://huggingface.co/spaces/an8136/pytorch-triage-env)
