@@ -354,7 +354,9 @@ async def run_episode(
         await env_client.close()
 
     total = sum(rewards)
-    score = round(min(max(total, 0.0), 1.0), 3)
+    # Validator requires score strictly in OPEN interval (0, 1) — not 0.0, not 1.0
+    _EPS  = 0.001
+    score = round(min(max(total, _EPS), 1.0 - _EPS), 3)
     return score, rewards, steps_taken
 
 
