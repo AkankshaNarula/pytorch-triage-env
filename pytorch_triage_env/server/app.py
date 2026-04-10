@@ -8,11 +8,15 @@ from fastapi.responses import JSONResponse
 from pydantic import TypeAdapter, ValidationError
 
 try:
-    from ..server.models import TriageAction, TriageObservation, TriageState
+    from .models import TriageAction, TriageObservation, TriageState
     from .environment import PyTorchTriageEnv
 except ImportError:
-    from server.models import TriageAction, TriageObservation, TriageState
-    from server.environment import PyTorchTriageEnv
+    try:
+        from pytorch_triage_env.server.models import TriageAction, TriageObservation, TriageState
+        from pytorch_triage_env.server.environment import PyTorchTriageEnv
+    except ImportError:
+        from server.models import TriageAction, TriageObservation, TriageState
+        from server.environment import PyTorchTriageEnv
 
 # Always use the manual server so that /health and /schema are fully under our
 # control.  create_app (openenv) registers its own /health (returning

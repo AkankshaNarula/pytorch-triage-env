@@ -8,8 +8,22 @@ Key design decisions:
 """
 from __future__ import annotations
 from typing import Annotated, Dict, List, Literal, Optional, Union
-from pydantic import Field
-from openenv.core.env_server.types import Action, Observation, State
+from pydantic import BaseModel, Field
+
+try:
+    from openenv.core.env_server.types import Action, Observation, State
+except ImportError:
+    # Fallback stubs when openenv is not installed
+    class Action(BaseModel):  # type: ignore[no-redef]
+        action_type: str = ""
+
+    class Observation(BaseModel):  # type: ignore[no-redef]
+        done: bool = False
+        reward: float = 0.0
+
+    class State(BaseModel):  # type: ignore[no-redef]
+        episode_id: str = ""
+        step_count: int = 0
 
 
 # ── Action sub-types ──────────────────────────────────────────────────────────

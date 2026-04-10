@@ -129,4 +129,4 @@ baseline:
   script: inference.py
   model: Qwen/Qwen2.5-72B-Instruct
   env_var_api_base: API_BASE_URL
-  env_var_api_key: API_KEY
+  env_var_api_key: HF_TOKEN

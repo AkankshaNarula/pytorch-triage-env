@@ -25,7 +25,12 @@ except ImportError:
     from server.rubrics import TrajectoryRubric, LLMJudgeRubric
     from server.virtual_fs import VirtualFileSystem
 
-from openenv.core.env_server.interfaces import Environment
+try:
+    from openenv.core.env_server.interfaces import Environment
+except ImportError:
+    class Environment:  # type: ignore[no-redef]
+        """Stub Environment base class when openenv is not installed."""
+        pass
 
 
 _TASK_DESCRIPTIONS = {
