@@ -8,3 +8,125 @@ description: >
   virtual files, edits code, runs mock training (generating authentic
   PyTorch error traces), and submits a verified fix with explanation.
   Implements RFC 004 LLMJudge rubric for understanding-based scoring.
+
+tags:
+  - openenv
+  - pytorch
+  - debugging
+  - code-review
+  - infrastructure
+  - rl-environment
+
+tasks:
+  - id: oom_graph_leak
+    description: >
+      Debug a CUDA out-of-memory crash caused by a computation graph leak.
+      The accumulator `epoch_loss += loss` retains the full computation graph
+      across batches. Fix: use `loss.item()` to detach from the graph.
+    difficulty: easy
+    max_steps: 8
+    reward_range: [0.0, 1.0]
+
+  - id: fsdp_collective_deadlock
+    description: >
+      Debug an FSDP distributed training deadlock. An all_reduce collective
+      operation is gated behind a `if rank == 0` guard, so only rank 0 calls
+      it while other ranks wait indefinitely. Fix: move collective ops outside
+      rank conditionals.
+    difficulty: medium
+    max_steps: 9
+    reward_range: [0.0, 1.0]
+
+  - id: compile_graph_break
+    description: >
+      Debug a torch.compile performance regression caused by a silent graph
+      break. A data-dependent Python branch forces Dynamo to fall back to
+      eager mode, causing recompilation overhead. Fix: use
+      @torch.compiler.disable on the problematic function.
+    difficulty: medium
+    max_steps: 10
+    reward_range: [0.0, 1.0]
+
+  - id: ddp_gradient_hang
+    description: >
+      Debug a DDP gradient synchronization hang. The model has a conditional
+      auxiliary head that is only used every 5th step, creating unused
+      parameters in most steps. DDP hangs waiting for gradient sync on those
+      params. Fix: add find_unused_parameters=True to the DDP wrapper.
+    difficulty: hard
+    max_steps: 9
+    reward_range: [0.0, 1.0]
+
+action_space:
+  type: discriminated_union
+  discriminator: action_type
+  actions:
+    - type: read_file
+      description: Read a file from the virtual workspace
+      fields:
+        filename: {type: string, description: "File to read (train.py, model.py, config.py, data_loader.py)"}
+
+    - type: edit_file
+      description: Apply a targeted string replacement to a file
+      fields:
+        filename: {type: string, description: "File to edit"}
+        old_str: {type: string, description: "Exact string to replace"}
+        new_str: {type: string, description: "Replacement string"}
+
+    - type: execute_bash
+      description: Run a shell command against the mock execution engine
+      fields:
+        command: {type: string, description: "Command to run (python train.py, torchrun ...)"}
+
+    - type: view_git_diff
+      description: Show unified diff of all changes vs original files
+      fields:
+        filename: {type: string, nullable: true, description: "Specific file or null for all"}
+
+    - type: submit_fix
+      description: Submit the final fix with a technical explanation
+      fields:
+        explanation: {type: string, description: "Deep technical explanation of root cause and fix"}
+
+observation_space:
+  task_name: {type: string, description: "Current task identifier"}
+  task_description: {type: string, description: "Incident report describing the failing training run"}
+  terminal_output: {type: string, description: "Output from the last action"}
+  current_files: {type: object, description: "Map of filename to current file content"}
+  run_status: {type: string, enum: [not_run, failing, partial, passing, diagnostic, syntax_error]}
+  system_status: {type: string, description: "idle | running | training_failed | training_passed"}
+  step_number: {type: integer, description: "Current step (1-indexed)"}
+  max_steps: {type: integer, description: "Maximum steps this episode"}
+  budget_remaining: {type: integer, description: "Steps remaining"}
+  actions_taken: {type: array, items: string, description: "Action types taken so far"}
+  hint: {type: string, nullable: true, description: "Diagnostic hint after 3+ failed runs"}
+  instructions: {type: string, description: "Task-specific strategy guide"}
+  done: {type: boolean, description: "Whether episode has ended"}
+  reward: {type: number, description: "Step reward in [0.0, 1.0]"}
+
+reward:
+  type: dense
+  description: >
+    Dense per-step rewards plus a terminal reward on submit_fix.
+    Per-step: +0.08 for reading signal files, +0.12 for correct diagnostic
+    flags, +0.05 for running training, +0.05 for edits, -0.08 for syntax
+    errors. Terminal: up to 1.0 × LLMJudge score for a verified fix with
+    deep explanation; partial credit for partial fixes.
+  range: [0.0, 1.0]
+
+endpoints:
+  reset: POST /reset
+  step: POST /step
+  state: GET /state
+  health: GET /health
+  schema: GET /schema
+
+docker:
+  port: 7860
+  image: python:3.11-slim
+
+baseline:
+  script: inference.py
+  model: Qwen/Qwen2.5-72B-Instruct
+  env_var_api_base: API_BASE_URL
+  env_var_api_key: API_KEY

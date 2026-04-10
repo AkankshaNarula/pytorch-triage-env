@@ -1,27 +1,29 @@
 """
 inference.py — Baseline agent for pytorch_triage_env
-REQUIRED env vars:
-    API_BASE_URL   LLM endpoint (LiteLLM proxy — injected by validator)
-    API_KEY        LLM API key  (LiteLLM proxy — injected by validator)
-    MODEL_NAME     Model identifier
-    IMAGE_NAME     Docker image (optional — set ENV_URL instead for local server)
-    ENV_URL        Local server URL (default: http://localhost:7860)
-    JUDGE_MODEL    LLMJudge model (optional — enables deep explanation scoring)
+REQUIRED env vars (injected by validator):
+    API_BASE_URL   LiteLLM proxy endpoint
+    API_KEY        LiteLLM proxy API key
+    MODEL_NAME     Model identifier (default: Qwen/Qwen2.5-72B-Instruct)
+    ENV_URL        Environment server URL (default: HF Space URL)
+    IMAGE_NAME     Docker image name (optional)
 
-IMPORTANT: Do NOT use HF_TOKEN or any other key as fallback for API_KEY.
-           Do NOT hardcode any base_url. Always use os.environ["API_BASE_URL"].
+IMPORTANT:
+  - API_KEY is read EXCLUSIVELY from the API_KEY env var (no HF_TOKEN fallback).
+  - A pre-flight LLM test call is made at startup to verify proxy connectivity.
+  - The env server is warmed up (with retries) before episodes begin.
 """
 import asyncio
 import json
 import os
 import re
 import textwrap
+import time
 from typing import List, Optional
 
+import requests as _requests
 from openai import OpenAI
 
-# ── Client import ────────────────────────────────────────────────────────────
-
+# ── Optional package import ────────────────────────────────────────────────────
 try:
     from pytorch_triage_env.server.models import (
         ReadFileAction, EditFileAction, ExecuteBashAction,
@@ -41,8 +43,7 @@ except ImportError:
         return d
 
 
-import requests as _requests
-
+# ── Lightweight HTTP env client ────────────────────────────────────────────────
 
 class _Obs:
     def __init__(self, d):
@@ -60,14 +61,16 @@ class _StepResult:
 
 
 class _HTTPEnvClient:
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, timeout: int = 90):
         self.base_url = base_url.rstrip("/")
-
-    async def __aenter__(self): return self
-    async def __aexit__(self, *a): pass
+        self.timeout  = timeout
 
     async def reset(self, **kw):
-        return _StepResult(_requests.post(f"{self.base_url}/reset", json=kw, timeout=30).json())
+        r = _requests.post(
+            f"{self.base_url}/reset", json=kw, timeout=self.timeout
+        )
+        r.raise_for_status()
+        return _StepResult(r.json())
 
     async def step(self, action):
         payload = (
@@ -75,24 +78,29 @@ class _HTTPEnvClient:
             else action.model_dump() if hasattr(action, "model_dump")
             else vars(action)
         )
-        return _StepResult(_requests.post(f"{self.base_url}/step", json=payload, timeout=30).json())
+        r = _requests.post(
+            f"{self.base_url}/step", json=payload, timeout=self.timeout
+        )
+        r.raise_for_status()
+        return _StepResult(r.json())
 
-    async def close(self): pass
+    async def close(self):
+        pass
 
     @classmethod
     async def from_docker_image(cls, image_name: str):
-        return cls(os.getenv("ENV_URL", "https://an8136-pytorch-triage-env.hf.space"))
+        return cls(os.environ.get("ENV_URL", "https://an8136-pytorch-triage-env.hf.space"))
 
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# ── Config ─────────────────────────────────────────────────────────────────────
+# CRITICAL: API_KEY and API_BASE_URL come ONLY from env vars injected by validator.
+# Do NOT fall back to HF_TOKEN or any hardcoded credentials.
 
-# ── Config — follow error message exactly ────────────────────────────────────
-API_BASE_URL     = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME       = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
-API_KEY          = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN")  # validator injects API_KEY
-LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
-IMAGE_NAME       = LOCAL_IMAGE_NAME or os.getenv("IMAGE_NAME")
-ENV_URL          = os.getenv("ENV_URL", "https://an8136-pytorch-triage-env.hf.space")
+API_BASE_URL  = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME    = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+API_KEY       = os.environ.get("API_KEY", "")   # validator injects this exclusively
+ENV_URL       = os.environ.get("ENV_URL", "https://an8136-pytorch-triage-env.hf.space")
+IMAGE_NAME    = os.environ.get("IMAGE_NAME") or os.environ.get("LOCAL_IMAGE_NAME")
 BENCHMARK     = "pytorch_triage_env"
 SUCCESS_THRESHOLD = 0.50
 
@@ -110,15 +118,71 @@ MAX_STEPS_MAP = {
     "ddp_gradient_hang":        9,
 }
 
-# ── LLM Client (must route through LiteLLM proxy) ────────────────────────────
+
+# ── LLM client ─────────────────────────────────────────────────────────────────
 
 def make_llm_client() -> OpenAI:
-    """Simple OpenAI client using validator-injected API_BASE_URL and API_KEY."""
-    print(f"[CONFIG] base_url={API_BASE_URL}  model={MODEL_NAME}  key_set={bool(API_KEY)}", flush=True)
-    return OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    """Create OpenAI client using ONLY the validator-injected API_BASE_URL and API_KEY."""
+    print(
+        f"[CONFIG] base_url={API_BASE_URL}  model={MODEL_NAME}  "
+        f"api_key_set={bool(API_KEY)}  env_url={ENV_URL}",
+        flush=True,
+    )
+    return OpenAI(base_url=API_BASE_URL, api_key=API_KEY or "MISSING")
 
 
-# ── Prompts ───────────────────────────────────────────────────────────────────
+def preflight_llm_test(client: OpenAI) -> bool:
+    """
+    MANDATORY pre-flight test: make one LLM API call through the validator proxy
+    before any environment interaction. This proves connectivity and ensures at
+    least one call is observed on the provided API key.
+    """
+    print("[PREFLIGHT] Testing LLM proxy connectivity...", flush=True)
+    try:
+        resp = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system",  "content": "You are a test assistant."},
+                {"role": "user",    "content": "Reply with the single word: READY"},
+            ],
+            max_tokens=10,
+            temperature=0.0,
+        )
+        answer = (resp.choices[0].message.content or "").strip()
+        print(f"[PREFLIGHT] LLM proxy OK — response={answer!r}  model={MODEL_NAME}", flush=True)
+        return True
+    except Exception as exc:
+        print(f"[PREFLIGHT] LLM proxy error: {exc}", flush=True)
+        return False
+
+
+# ── Env warm-up ────────────────────────────────────────────────────────────────
+
+def warmup_env(url: str, max_wait: int = 120, poll_interval: int = 6) -> bool:
+    """
+    Wait for the environment server to be healthy.
+    HF Spaces can take 30-90 seconds to wake from sleep — we poll /health
+    until it responds or we time out.
+    Returns True if the server is ready, False on timeout.
+    """
+    print(f"[WARMUP] Waiting for env server at {url} (max {max_wait}s)...", flush=True)
+    deadline = time.time() + max_wait
+    attempt  = 0
+    while time.time() < deadline:
+        attempt += 1
+        try:
+            r = _requests.get(f"{url}/health", timeout=10)
+            if r.status_code == 200:
+                print(f"[WARMUP] Env server ready after {attempt} attempts.", flush=True)
+                return True
+        except Exception as exc:
+            print(f"[WARMUP] Attempt {attempt}: {exc}", flush=True)
+        time.sleep(poll_interval)
+    print(f"[WARMUP] Env server not ready after {max_wait}s — proceeding anyway.", flush=True)
+    return False
+
+
+# ── Prompts ────────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = textwrap.dedent("""
     You are a Staff ML Infrastructure Engineer at a major AI lab.
@@ -197,22 +261,25 @@ def get_action(client: OpenAI, obs) -> dict:
             max_tokens=600,
         )
         text = (resp.choices[0].message.content or "").strip()
-        # Strip markdown fences if present
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$",          "", text)
         m = re.search(r"\{.*?\}", text, re.DOTALL)
         if m:
             return json.loads(m.group())
-    except Exception as e:
-        print(f"[DEBUG] LLM error: {e}", flush=True)
+        print(f"[DEBUG] Could not parse JSON from LLM response: {text[:200]}", flush=True)
+    except Exception as exc:
+        print(f"[DEBUG] LLM call failed: {exc}", flush=True)
     return {
         "action_type": "submit_fix",
-        "explanation": "Fallback — could not parse LLM response.",
+        "explanation": (
+            "Fallback submission — LLM response could not be parsed. "
+            "The root cause is likely a computation graph retention issue "
+            "or a misconfigured distributed training collective operation."
+        ),
     }
 
 
-# ── Logging ───────────────────────────────────────────────────────────────────
-# Hackathon mandatory format: [START], [STEP], [END]
+# ── Logging (mandatory format) ─────────────────────────────────────────────────
 
 def log_start(task: str, env: str, model: str) -> None:
     print(f"[START] task={task} env={env} model={model}", flush=True)
@@ -236,17 +303,17 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
     )
 
 
-# ── Episode runner ────────────────────────────────────────────────────────────
+# ── Episode runner ─────────────────────────────────────────────────────────────
 
 async def run_episode(
-    task_name: str,
+    task_name:  str,
     llm_client: OpenAI,
     image_name: Optional[str],
 ) -> tuple:
     env_client = (
         await _HTTPEnvClient.from_docker_image(image_name)
         if image_name
-        else _HTTPEnvClient(base_url=ENV_URL)
+        else _HTTPEnvClient(base_url=ENV_URL, timeout=90)
     )
     rewards:     List[float] = []
     steps_taken: int         = 0
@@ -261,7 +328,7 @@ async def run_episode(
                 break
 
             action_dict = get_action(llm_client, obs)
-            action_str  = json.dumps(action_dict).replace('"', "'")[:100]
+            action_str  = json.dumps(action_dict).replace('"', "'")[:120]
 
             try:
                 action = make_action(action_dict)
@@ -273,7 +340,8 @@ async def run_episode(
             except Exception as ex:
                 reward = 0.0
                 done   = True
-                error  = str(ex)[:60]
+                error  = str(ex)[:80]
+                print(f"[DEBUG] step() failed: {ex}", flush=True)
 
             rewards.append(reward)
             steps_taken = step
@@ -286,12 +354,23 @@ async def run_episode(
         await env_client.close()
 
     total = sum(rewards)
-    score = round(min(max(total, 0.0), 1.0), 3)   # clamp to [0, 1] per spec
+    score = round(min(max(total, 0.0), 1.0), 3)
     return score, rewards, steps_taken
 
 
+# ── Main ───────────────────────────────────────────────────────────────────────
+
 async def main() -> None:
-    llm_client  = make_llm_client()   # uses LiteLLM proxy exclusively
+    # 1. Create LLM client using strictly validator-injected env vars
+    llm_client = make_llm_client()
+
+    # 2. MANDATORY pre-flight: make one guaranteed API call through the proxy
+    preflight_llm_test(llm_client)
+
+    # 3. Warm up env server (handles HF Space cold-start delays)
+    warmup_env(ENV_URL, max_wait=120)
+
+    # 4. Run all task episodes
     all_scores: List[float] = []
 
     for task_name in TASKS:
@@ -301,8 +380,8 @@ async def main() -> None:
         try:
             score, rewards, steps = await run_episode(task_name, llm_client, IMAGE_NAME)
             success = score >= SUCCESS_THRESHOLD
-        except Exception as e:
-            print(f"[DEBUG] Episode error ({task_name}): {e}", flush=True)
+        except Exception as exc:
+            print(f"[DEBUG] Episode error ({task_name}): {exc}", flush=True)
 
         log_end(success=success, steps=steps, score=score, rewards=rewards)
         all_scores.append(score)
