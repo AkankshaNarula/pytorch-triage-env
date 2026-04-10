@@ -46,10 +46,19 @@ except ImportError:
 
 class _Obs:
     def __init__(self, d):
-        [setattr(self, k, _Obs(v) if isinstance(v, dict) else (
-            [_Obs(i) if isinstance(i, dict) else i for i in v]
-            if isinstance(v, list) else v
-        )) for k, v in (d or {}).items()]
+        for k, v in (d or {}).items():
+            if isinstance(v, dict) and all(
+                isinstance(vv, (str, int, float, bool, type(None)))
+                for vv in v.values()
+            ):
+                # Keep flat str→str/primitive dicts as plain dicts (e.g. current_files)
+                setattr(self, k, v)
+            elif isinstance(v, dict):
+                setattr(self, k, _Obs(v))
+            elif isinstance(v, list):
+                setattr(self, k, [_Obs(i) if isinstance(i, dict) else i for i in v])
+            else:
+                setattr(self, k, v)
 
 
 class _StepResult:
