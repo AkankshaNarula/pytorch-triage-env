@@ -54,7 +54,9 @@ else:
         task = body.get("task", "oom_graph_leak")
         _env = PyTorchTriageEnv(task_name=task)
         obs  = _env.reset(**body)
-        return {"observation": obs.model_dump(), "reward": 0.0, "done": False}
+        # OpenEnv validator expects the observation fields at the TOP LEVEL
+        # (not nested under an "observation" key)
+        return obs.model_dump()
 
     @app.post("/step")
     async def step(request: Request):
@@ -96,7 +98,6 @@ async def health():
         "tasks": [
             "oom_graph_leak",
             "fsdp_collective_deadlock",
-            "compile_graph_break",
             "ddp_gradient_hang",
         ],
     }

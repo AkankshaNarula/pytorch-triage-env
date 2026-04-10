@@ -44,11 +44,6 @@ Production alert: distributed training run `llm-sft-4node` has been frozen for 3
 All 4 processes appear alive (ps shows them running) but no output since step 0.
 This is a 4×GPU job using FSDP. NCCL Watchdog timeout imminent.
 """,
-    "compile_graph_break": """\
-Performance regression: training throughput on `vit-b16-imagenet` dropped 40%.
-We enabled torch.compile last week expecting a 2.4× speedup.
-Instead it's running slower than eager mode. No crashes. Loss is converging normally.
-""",
     "ddp_gradient_hang": """\
 Production alert: multi-GPU training job `multitask-cls-4gpu` hangs after step 0.
 Uses DDP with 4 GPUs. The model has both a main head and an auxiliary head.
@@ -83,19 +78,6 @@ Strategy:
 5. Verify the fix
 6. submit_fix explaining why collective ops cannot be inside rank conditionals
 """,
-    "compile_graph_break": """\
-Debug a torch.compile performance regression (silent graph break).
-Files: train.py, model.py, config.py, data_loader.py
-Actions: read_file, edit_file, execute_bash, view_git_diff, submit_fix
-
-Strategy:
-1. execute_bash("python train.py") — confirm slower than eager
-2. execute_bash("TORCH_LOGS=dynamo python train.py") — find the graph break
-3. read_file("train.py") — locate the data-dependent branch
-4. edit_file — apply @torch.compiler.disable or restructure
-5. execute_bash("TORCH_LOGS=dynamo python train.py") — verify 0 graph breaks
-6. submit_fix explaining data-dependent control flow and Dynamo limitations
-""",
     "ddp_gradient_hang": """\
 Debug a DDP gradient synchronization hang.
 Files: train.py, model.py, config.py, data_loader.py
@@ -113,7 +95,6 @@ Strategy:
 _MAX_STEPS = {
     "oom_graph_leak":           8,
     "fsdp_collective_deadlock": 9,
-    "compile_graph_break":      10,
     "ddp_gradient_hang":        9,
 }
 

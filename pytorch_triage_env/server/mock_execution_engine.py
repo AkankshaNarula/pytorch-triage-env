@@ -688,14 +688,6 @@ TASK_CONFIGS = {
         "fix_signatures": _FSDP_DEADLOCK_FIX_SIGNATURES,
         "hint": "The NCCL timeout says a collective op isn't being called by all ranks. Which ranks call dist.all_reduce?",
     },
-    "compile_graph_break": {
-        "files": _COMPILE_GRAPH_BREAK_FILES,
-        "buggy_trace": _COMPILE_GRAPH_BREAK_BUGGY_TRACE,
-        "success_trace": _COMPILE_GRAPH_BREAK_SUCCESS_TRACE,
-        "diagnostic_trace": _COMPILE_GRAPH_BREAK_DYNAMO_TRACE,
-        "fix_signatures": _COMPILE_GRAPH_BREAK_FIX_SIGNATURES,
-        "hint": "Run with TORCH_LOGS=dynamo to see where the graph break occurs.",
-    },
     "ddp_gradient_hang": {
         "files": _DDP_GRADIENT_HANG_FILES,
         "buggy_trace": _DDP_GRADIENT_HANG_BUGGY_TRACE,
@@ -762,8 +754,6 @@ class MockExecutionEngine:
         return "failing", cfg["buggy_trace"]
 
     def _is_diagnostic_command(self, command: str, task_name: str) -> bool:
-        if task_name == "compile_graph_break":
-            return "TORCH_LOGS" in command and "dynamo" in command
         return False
 
     def _check_fsdp_fix(self, files: Dict[str, str], cfg: dict) -> Tuple[str, str]:

@@ -37,16 +37,6 @@ tasks:
     max_steps: 9
     reward_range: [0.0, 1.0]
 
-  - id: compile_graph_break
-    description: >
-      Debug a torch.compile performance regression caused by a silent graph
-      break. A data-dependent Python branch forces Dynamo to fall back to
-      eager mode, causing recompilation overhead. Fix: use
-      @torch.compiler.disable on the problematic function.
-    difficulty: medium
-    max_steps: 10
-    reward_range: [0.0, 1.0]
-
   - id: ddp_gradient_hang
     description: >
       Debug a DDP gradient synchronization hang. The model has a conditional

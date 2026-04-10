@@ -115,14 +115,12 @@ SUCCESS_THRESHOLD = 0.50
 TASKS = [
     "oom_graph_leak",
     "fsdp_collective_deadlock",
-    "compile_graph_break",
     "ddp_gradient_hang",
 ]
 
 MAX_STEPS_MAP = {
     "oom_graph_leak":           8,
     "fsdp_collective_deadlock": 9,
-    "compile_graph_break":      10,
     "ddp_gradient_hang":        9,
 }
 
