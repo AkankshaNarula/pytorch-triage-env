@@ -1,4 +1,11 @@
-# pytorch_triage_env 🔥
+---
+title: PyTorch Triage Env
+emoji: 🔥
+colorFrom: red
+colorTo: yellow
+sdk: docker
+pinned: false
+---
 
 > **OpenEnv Hackathon 2026** — A PyTorch Training Infrastructure Triage RL Environment
 
@@ -42,16 +49,15 @@ flowchart TD
             E1 --> E4[Rubrics]
 
             E2[virtual_fs.py\nIn-memory files\nGit diff tracking]
-            E3[mock_execution_engine.py\nPre-written error traces\n4 task scenarios]
+            E3[mock_execution_engine.py\nPre-written error traces\n3 task scenarios]
             E4[rubrics.py\nTrajectoryRubric\nLLMJudgeRubric]
         end
     end
 
-    subgraph TASKS ["📋 4 Debug Tasks"]
+    subgraph TASKS ["📋 3 Debug Tasks"]
         T1["oom_graph_leak\n(easy)"]
         T2["fsdp_collective_deadlock\n(medium)"]
-        T3["compile_graph_break\n(medium)"]
-        T4["ddp_gradient_hang\n(hard)"]
+        T3["ddp_gradient_hang\n(hard)"]
     end
 
     A5 -->|JSON action| SERVER
@@ -104,7 +110,6 @@ sequenceDiagram
 |------|-----------|-----------|------------|-----|
 | `oom_graph_leak` | Easy | 8 | `epoch_loss += loss` retains computation graph across batches → CUDA OOM | Use `loss.item()` to detach |
 | `fsdp_collective_deadlock` | Medium | 9 | `all_reduce` inside `if rank == 0` — only rank 0 calls it, others hang | Move collective ops outside rank conditionals |
-| `compile_graph_break` | Medium | 10 | Data-dependent Python branch forces Dynamo to eager mode → recompilation overhead | Add `@torch.compiler.disable` to problematic function |
 | `ddp_gradient_hang` | Hard | 9 | Conditional auxiliary head used every 5th step → unused params → DDP hangs on gradient sync | Set `find_unused_parameters=True` in DDP wrapper |
 
 ---
@@ -170,7 +175,7 @@ pytorch_triage_env/           # Installable Python package
     ├── app.py                # FastAPI server — /reset /step /state /health /schema
     ├── environment.py        # PyTorchTriageEnv — reset() step() state property
     ├── virtual_fs.py         # In-memory file system with git diff tracking
-    ├── mock_execution_engine.py  # 4 task scenarios with authentic PyTorch traces
+    ├── mock_execution_engine.py  # 3 task scenarios with authentic PyTorch traces
     ├── rubrics.py            # TrajectoryRubric + LLMJudgeRubric scoring
     ├── models.py             # Pydantic v2 discriminated union action models
     └── requirements.txt
@@ -320,17 +325,43 @@ The system prompt guides the LLM through a `execute_bash → read_file → edit_
 
 ## Baseline Scores
 
-Scores measured by running the oracle (optimal) agent locally against the mock environment. The oracle takes the known-correct fix actions for each task in minimal steps.
+Scores from running `Qwen/Qwen2.5-72B-Instruct` against the environment locally (`ENV_URL=http://localhost:7860`). The agent receives no task-specific hints — it reads the error trace, diagnoses the root cause, applies a fix, and submits an explanation entirely from LLM reasoning.
 
-| Task | Difficulty | Max Steps | Oracle Steps | Oracle Score | Fix Verified |
-|------|-----------|-----------|-------------|-------------|-------------|
-| `oom_graph_leak` | Easy | 8 | 5 | **0.999** | ✅ |
-| `fsdp_collective_deadlock` | Medium | 9 | 5 | **0.999** | ✅ |
-| `compile_graph_break` | Medium | 10 | 6 | **0.999** | ✅ |
-| `ddp_gradient_hang` | Hard | 9 | 6 | **0.999** | ✅ |
-| **Mean** | | | **5.5** | **0.999** | |
+```
+[CONFIG] base_url=https://router.huggingface.co/v1  model=Qwen/Qwen2.5-72B-Instruct
 
-> **Oracle score** = perfect agent that knows the exact fix. A real LLM agent (Phase 2 evaluation) is expected to score lower due to exploration steps, imprecise edits, and explanation quality variance.
+[START] task=oom_graph_leak
+[STEP] step=1  action=execute_bash            reward=0.05   done=false
+[STEP] step=2  action=edit_file               reward=0.05   done=false
+[STEP] step=3  action=execute_bash            reward=0.05   done=false
+[STEP] step=4  action=submit_fix              reward=0.75   done=true
+[END]  success=true  steps=4  score=0.900  rewards=0.05,0.05,0.05,0.75
+
+[START] task=fsdp_collective_deadlock
+[STEP] step=1  action=execute_bash            reward=0.05   done=false
+[STEP] step=2  action=edit_file               reward=-0.08  done=false
+[STEP] step=3  action=execute_bash            reward=0.05   done=false
+[STEP] step=4  action=submit_fix              reward=1.06   done=true
+[END]  success=true  steps=4  score=0.999  rewards=0.05,-0.08,0.05,1.06
+
+[START] task=ddp_gradient_hang
+[STEP] step=1  action=execute_bash            reward=0.05   done=false
+[STEP] step=2  action=edit_file               reward=0.05   done=false
+[STEP] step=3  action=execute_bash            reward=0.05   done=false
+[STEP] step=4  action=submit_fix              reward=0.76   done=true
+[END]  success=true  steps=4  score=0.906  rewards=0.05,0.05,0.05,0.76
+
+[SUMMARY] tasks=3  avg_score=0.935
+```
+
+| Task | Difficulty | Steps Used / Max | Score | Cumulative Reward |
+|------|-----------|-----------------|-------|-------------------|
+| `oom_graph_leak` | Easy | 4 / 8 | **0.900** | 0.90 |
+| `fsdp_collective_deadlock` | Medium | 4 / 9 | **0.999** | 1.08 |
+| `ddp_gradient_hang` | Hard | 4 / 9 | **0.906** | 0.91 |
+| **Mean** | | **4 / —** | **0.935** | |
+
+All three tasks solved in 4 steps each — well under the per-task step budget. The `fsdp_collective_deadlock` task reached the validator ceiling (0.999) with a perfect explanation. The small penalty on step 2 (`-0.08`) for an imprecise `edit_file` match was recovered by the terminal reward quality.
 
 ### Phase 2 Evaluation — What the judges run
 
@@ -353,7 +384,7 @@ python inference.py
 - The `hint` field (appears after 3 failed runs) guides a stuck agent toward the fix
 - `submit_fix` explanations are scored on depth — a brief explanation still gets partial credit (0.3+)
 
-**Expected Phase 2 score range** (general LLM, no fine-tuning): `0.40 – 0.75` per task depending on model reasoning quality. The gap between oracle (0.999) and a general agent represents the exploration + explanation quality challenge.
+**Expected Phase 2 score range** (general LLM, no fine-tuning): `0.40 – 0.75` per task depending on model reasoning quality. Our baseline run at **0.935 avg** with Qwen2.5-72B sets a strong upper bound.
 
 ---
 
