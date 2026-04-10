@@ -1,14 +1,13 @@
 """
 inference.py — Baseline agent for pytorch_triage_env
 REQUIRED env vars (injected by validator):
-    API_BASE_URL   LiteLLM proxy endpoint
-    API_KEY        LiteLLM proxy API key
-    MODEL_NAME     Model identifier (default: Qwen/Qwen2.5-72B-Instruct)
-    ENV_URL        Environment server URL (default: HF Space URL)
-    IMAGE_NAME     Docker image name (optional)
+    API_BASE_URL      LiteLLM proxy endpoint (default: HF router)
+    MODEL_NAME        Model identifier (default: Qwen/Qwen2.5-72B-Instruct)
+    HF_TOKEN          API key — injected by validator, NO default
+    LOCAL_IMAGE_NAME  Docker image name (optional, for from_docker_image())
 
 IMPORTANT:
-  - API_KEY is read EXCLUSIVELY from the API_KEY env var (no HF_TOKEN fallback).
+  - HF_TOKEN has NO default — validator injects it. Matches checklist exactly.
   - A pre-flight LLM test call is made at startup to verify proxy connectivity.
   - The env server is warmed up (with retries) before episodes begin.
 """
@@ -92,16 +91,16 @@ class _HTTPEnvClient:
         return cls(os.environ.get("ENV_URL", "https://an8136-pytorch-triage-env.hf.space"))
 
 
-# ── Config ─────────────────────────────────────────────────────────────────────
-# CRITICAL: API_KEY and API_BASE_URL come ONLY from env vars injected by validator.
-# Do NOT fall back to HF_TOKEN or any hardcoded credentials.
+# ── Config — MATCHES SUBMISSION CHECKLIST EXACTLY ──────────────────────────────
+# Defaults ONLY for API_BASE_URL and MODEL_NAME. HF_TOKEN has NO default.
+API_BASE_URL     = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME       = os.getenv("MODEL_NAME",   "Qwen/Qwen2.5-72B-Instruct")
+HF_TOKEN         = os.getenv("HF_TOKEN")          # injected by validator — no default
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")  # optional: for from_docker_image()
 
-API_BASE_URL  = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME    = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
-API_KEY       = os.environ.get("API_KEY", "")   # validator injects this exclusively
-ENV_URL       = os.environ.get("ENV_URL", "https://an8136-pytorch-triage-env.hf.space")
-IMAGE_NAME    = os.environ.get("IMAGE_NAME") or os.environ.get("LOCAL_IMAGE_NAME")
-BENCHMARK     = "pytorch_triage_env"
+ENV_URL          = os.getenv("ENV_URL", "https://an8136-pytorch-triage-env.hf.space")
+IMAGE_NAME       = LOCAL_IMAGE_NAME or os.getenv("IMAGE_NAME")
+BENCHMARK        = "pytorch_triage_env"
 SUCCESS_THRESHOLD = 0.50
 
 TASKS = [
@@ -122,13 +121,14 @@ MAX_STEPS_MAP = {
 # ── LLM client ─────────────────────────────────────────────────────────────────
 
 def make_llm_client() -> OpenAI:
-    """Create OpenAI client using ONLY the validator-injected API_BASE_URL and API_KEY."""
+    """Create OpenAI client via validator-injected API_BASE_URL and HF_TOKEN."""
     print(
         f"[CONFIG] base_url={API_BASE_URL}  model={MODEL_NAME}  "
-        f"api_key_set={bool(API_KEY)}  env_url={ENV_URL}",
+        f"hf_token_set={bool(HF_TOKEN)}  env_url={ENV_URL}",
         flush=True,
     )
-    return OpenAI(base_url=API_BASE_URL, api_key=API_KEY or "MISSING")
+    # Use HF_TOKEN as api_key per submission checklist
+    return OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 
 
 def preflight_llm_test(client: OpenAI) -> bool:
