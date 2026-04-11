@@ -54,9 +54,14 @@ else:
         task = body.get("task", "oom_graph_leak")
         _env = PyTorchTriageEnv(task_name=task)
         obs  = _env.reset(**body)
-        # OpenEnv validator expects the observation fields at the TOP LEVEL
-        # (not nested under an "observation" key)
-        return obs.model_dump()
+        # OpenEnv ResetResponse format: observation fields nested under
+        # "observation" key, with reward and done at the top level.
+        obs_dict = obs.model_dump(exclude={"reward", "done", "metadata"})
+        return {
+            "observation": obs_dict,
+            "reward": obs.reward,
+            "done": obs.done,
+        }
 
     @app.post("/step")
     async def step(request: Request):
@@ -67,11 +72,11 @@ else:
         except ValidationError as exc:
             return JSONResponse(status_code=422, content={"detail": exc.errors()})
         obs = _env.step(action)
+        obs_dict = obs.model_dump(exclude={"reward", "done", "metadata"})
         return {
-            "observation": obs.model_dump(),
+            "observation": obs_dict,
             "reward": obs.reward,
             "done":   obs.done,
-            "state":  _env.state.model_dump(),
         }
 
     @app.get("/state")
@@ -89,10 +94,21 @@ else:
 
 # ── Always-present endpoints (health + schema) ────────────────────────────────
 
+@app.get("/")
+async def root():
+    return {
+        "name": "pytorch-triage-env",
+        "version": "1.0.0",
+        "description": "PyTorch Training Infrastructure Triage RL Environment",
+        "endpoints": ["/reset", "/step", "/state", "/health", "/schema"],
+        "tasks": ["oom_graph_leak", "fsdp_collective_deadlock", "ddp_gradient_hang"],
+    }
+
+
 @app.get("/health")
 async def health():
     return {
-        "status": "ok",
+        "status": "healthy",
         "env":    "pytorch-triage-env",
         "version": "1.0.0",
         "tasks": [
@@ -106,12 +122,9 @@ async def health():
 @app.get("/schema")
 async def schema():
     return {
+        "action":        _action_adapter.json_schema(),
         "observation":   TriageObservation.model_json_schema(),
         "state":         TriageState.model_json_schema(),
-        "action_types": [
-            "read_file", "edit_file", "execute_bash",
-            "view_git_diff", "submit_fix",
-        ],
     }
 
 
