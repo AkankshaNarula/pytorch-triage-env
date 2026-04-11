@@ -18,6 +18,12 @@ An LLM agent acts as a **Staff ML Infrastructure Engineer** debugging real produ
 
 ---
 
+## Why This Matters
+
+PyTorch training failures are one of the most time-consuming and high-stakes problems in ML engineering. CUDA OOMs, FSDP collective deadlocks, and DDP gradient hangs have caused significant lost GPU-hours and delayed model launches at companies across the industry. This environment turns that operational pain into a structured benchmark — giving the RL and agent community a realistic, reproducible arena for evaluating LLM debugging agents on **code that ships in production**.
+
+---
+
 ## Architecture
 
 ```mermaid
@@ -161,6 +167,121 @@ Score range: strictly (0.001, 0.999) — open interval required by validator
 
 ---
 
+## Baseline Scores
+
+### Multi-Model Benchmark
+
+Scores from running multiple models against all three tasks. All runs use `ENV_URL=http://localhost:7860` (local server). No task-specific hints — agents read the error trace, diagnose the root cause, apply a fix, and submit an explanation entirely from LLM reasoning.
+
+| Model | Size | Avg Score | Easy | Medium | Hard |
+|-------|------|-----------|------|--------|------|
+| **Qwen2.5-72B-Instruct** | API | **0.935** | 0.900 | 0.999 | 0.906 |
+| **nemotron-3-nano** | 24 GB | **0.893** | 0.999 | 0.680 | 0.999 |
+| **gemma3:27b** | 17 GB | **0.783** | 0.999 | 0.350 | 0.999 |
+| **qwen2.5:3b** | 1.9 GB | **0.723** | 0.300 | 0.999 | 0.871 |
+
+> **Key insight:** Even a 1.9 GB model (`qwen2.5:3b`) achieves 0.723 avg — demonstrating the environment is accessible to a broad range of model sizes while still discriminating between capability levels.
+
+---
+
+### Qwen2.5-72B-Instruct (Baseline)
+
+```
+[CONFIG] base_url=https://router.huggingface.co/v1  model=Qwen/Qwen2.5-72B-Instruct
+
+[START] task=oom_graph_leak
+[STEP] step=1  action=execute_bash            reward=0.05   done=false
+[STEP] step=2  action=edit_file               reward=0.05   done=false
+[STEP] step=3  action=execute_bash            reward=0.05   done=false
+[STEP] step=4  action=submit_fix              reward=0.75   done=true
+[END]  success=true  steps=4  score=0.900  rewards=0.05,0.05,0.05,0.75
+
+[START] task=fsdp_collective_deadlock
+[STEP] step=1  action=execute_bash            reward=0.05   done=false
+[STEP] step=2  action=edit_file               reward=-0.08  done=false
+[STEP] step=3  action=execute_bash            reward=0.05   done=false
+[STEP] step=4  action=submit_fix              reward=1.06   done=true
+[END]  success=true  steps=4  score=0.999  rewards=0.05,-0.08,0.05,1.06
+
+[START] task=ddp_gradient_hang
+[STEP] step=1  action=execute_bash            reward=0.05   done=false
+[STEP] step=2  action=edit_file               reward=0.05   done=false
+[STEP] step=3  action=execute_bash            reward=0.05   done=false
+[STEP] step=4  action=submit_fix              reward=0.76   done=true
+[END]  success=true  steps=4  score=0.906  rewards=0.05,0.05,0.05,0.76
+
+[SUMMARY] tasks=3  avg_score=0.935
+```
+
+| Task | Difficulty | Steps Used / Max | Score | Cumulative Reward |
+|------|-----------|-----------------|-------|-------------------|
+| `oom_graph_leak` | Easy | 4 / 8 | **0.900** | 0.90 |
+| `fsdp_collective_deadlock` | Medium | 4 / 9 | **0.999** | 1.08 |
+| `ddp_gradient_hang` | Hard | 4 / 9 | **0.906** | 0.91 |
+| **Mean** | | **4 / —** | **0.935** | |
+
+---
+
+### Nemotron-3-Nano (24 GB local)
+
+| Task | Difficulty | Score | Steps | Result |
+|------|-----------|-------|-------|--------|
+| `oom_graph_leak` | Easy | **0.999** | 4 | Pass |
+| `fsdp_collective_deadlock` | Medium | **0.680** | 8 | Pass *(struggled with JSON output)* |
+| `ddp_gradient_hang` | Hard | **0.999** | 4 | Pass |
+| **Mean** | | **0.893** | | |
+
+> Nemotron-3-Nano solved Easy and Hard in just 4 steps, hitting the ceiling score (0.999) on both. The Medium task required 8 of 9 steps and scored 0.680 due to JSON formatting issues — a clear signal this task correctly discriminates model capability. **Avg: 0.893.**
+
+---
+
+### gemma3:27b (17 GB local)
+
+| Task | Difficulty | Score | Notes |
+|------|-----------|-------|-------|
+| `oom_graph_leak` | Easy | **0.999** | Perfect |
+| `fsdp_collective_deadlock` | Medium | **0.350** | Partial credit only |
+| `ddp_gradient_hang` | Hard | **0.999** | Perfect |
+| **Mean** | | **0.783** | |
+
+---
+
+### qwen2.5:3b (1.9 GB local)
+
+| Task | Difficulty | Score | Notes |
+|------|-----------|-------|-------|
+| `oom_graph_leak` | Easy | **0.300** | Partial — struggled with diagnosis |
+| `fsdp_collective_deadlock` | Medium | **0.999** | Perfect |
+| `ddp_gradient_hang` | Hard | **0.871** | Strong |
+| **Mean** | | **0.723** | |
+
+---
+
+### Phase 2 Evaluation — What the judges run
+
+In Phase 2, the hackathon judges run a **standard Open LLM agent** (e.g. Nemotron Super 49B) against your environment with no task-specific tuning. Your environment needs to be solvable by a general-purpose agent, not just your own baseline.
+
+**How to simulate Phase 2 locally** — swap `MODEL_NAME` for any model the judge might use:
+
+```bash
+export HF_TOKEN=hf_yourtoken
+export MODEL_NAME=nvidia/Llama-3_1-Nemotron-51B-Instruct   # judge's model
+export ENV_URL=http://localhost:7860
+
+python inference.py
+```
+
+**What makes an environment score well in Phase 2:**
+- The LLM can read the error trace and understand what's wrong (clear `task_description` + authentic traces)
+- The file edit `old_str` is a short, unambiguous, exact-match string (easier for an LLM to quote correctly)
+- After a correct fix, `run_status` flips to `passing` immediately (clear reward signal)
+- The `hint` field (appears after 3 failed runs) guides a stuck agent toward the fix
+- `submit_fix` explanations are scored on depth — a brief explanation still gets partial credit (0.3+)
+
+**Expected Phase 2 score range** (general LLM, no fine-tuning): `0.40 – 0.75` per task depending on model reasoning quality. Our baseline run at **0.935 avg** with Qwen2.5-72B sets a strong upper bound.
+
+---
+
 ## Project Structure
 
 ```
@@ -242,6 +363,33 @@ python inference.py
 
 ---
 
+## Observation Space
+
+Each step returns an observation with:
+
+```json
+{
+  "task_name": "oom_graph_leak",
+  "task_description": "Incident report...",
+  "terminal_output": "CUDA out of memory...",
+  "current_files": {"train.py": "..."},
+  "run_status": "failing",
+  "system_status": "training_failed",
+  "step_number": 2,
+  "max_steps": 8,
+  "budget_remaining": 6,
+  "actions_taken": ["execute_bash"],
+  "hint": null,
+  "instructions": "Strategy guide for this task...",
+  "done": false,
+  "reward": 0.05
+}
+```
+
+After 3+ failed runs, a `hint` field is populated with a diagnostic clue.
+
+---
+
 ## Testing
 
 ```bash
@@ -279,33 +427,6 @@ cd pytorch_triage_env && openenv validate && cd ..
 
 ---
 
-## Observation Space
-
-Each step returns an observation with:
-
-```json
-{
-  "task_name": "oom_graph_leak",
-  "task_description": "Incident report...",
-  "terminal_output": "CUDA out of memory...",
-  "current_files": {"train.py": "..."},
-  "run_status": "failing",
-  "system_status": "training_failed",
-  "step_number": 2,
-  "max_steps": 8,
-  "budget_remaining": 6,
-  "actions_taken": ["execute_bash"],
-  "hint": null,
-  "instructions": "Strategy guide for this task...",
-  "done": false,
-  "reward": 0.05
-}
-```
-
-After 3+ failed runs, a `hint` field is populated with a diagnostic clue.
-
----
-
 ## How the Baseline Agent Works
 
 `inference.py` implements a simple but effective debugging loop:
@@ -320,71 +441,6 @@ After 3+ failed runs, a `hint` field is populated with a diagnostic clue.
 4. **Scoring** — scores clamped to open interval (0.001, 0.999) per validator spec
 
 The system prompt guides the LLM through a `execute_bash → read_file → edit_file → execute_bash → submit_fix` workflow with emphasis on deep technical explanations (which the LLM judge rewards with higher scores).
-
----
-
-## Baseline Scores
-
-Scores from running `Qwen/Qwen2.5-72B-Instruct` against the environment locally (`ENV_URL=http://localhost:7860`). The agent receives no task-specific hints — it reads the error trace, diagnoses the root cause, applies a fix, and submits an explanation entirely from LLM reasoning.
-
-```
-[CONFIG] base_url=https://router.huggingface.co/v1  model=Qwen/Qwen2.5-72B-Instruct
-
-[START] task=oom_graph_leak
-[STEP] step=1  action=execute_bash            reward=0.05   done=false
-[STEP] step=2  action=edit_file               reward=0.05   done=false
-[STEP] step=3  action=execute_bash            reward=0.05   done=false
-[STEP] step=4  action=submit_fix              reward=0.75   done=true
-[END]  success=true  steps=4  score=0.900  rewards=0.05,0.05,0.05,0.75
-
-[START] task=fsdp_collective_deadlock
-[STEP] step=1  action=execute_bash            reward=0.05   done=false
-[STEP] step=2  action=edit_file               reward=-0.08  done=false
-[STEP] step=3  action=execute_bash            reward=0.05   done=false
-[STEP] step=4  action=submit_fix              reward=1.06   done=true
-[END]  success=true  steps=4  score=0.999  rewards=0.05,-0.08,0.05,1.06
-
-[START] task=ddp_gradient_hang
-[STEP] step=1  action=execute_bash            reward=0.05   done=false
-[STEP] step=2  action=edit_file               reward=0.05   done=false
-[STEP] step=3  action=execute_bash            reward=0.05   done=false
-[STEP] step=4  action=submit_fix              reward=0.76   done=true
-[END]  success=true  steps=4  score=0.906  rewards=0.05,0.05,0.05,0.76
-
-[SUMMARY] tasks=3  avg_score=0.935
-```
-
-| Task | Difficulty | Steps Used / Max | Score | Cumulative Reward |
-|------|-----------|-----------------|-------|-------------------|
-| `oom_graph_leak` | Easy | 4 / 8 | **0.900** | 0.90 |
-| `fsdp_collective_deadlock` | Medium | 4 / 9 | **0.999** | 1.08 |
-| `ddp_gradient_hang` | Hard | 4 / 9 | **0.906** | 0.91 |
-| **Mean** | | **4 / —** | **0.935** | |
-
-All three tasks solved in 4 steps each — well under the per-task step budget. The `fsdp_collective_deadlock` task reached the validator ceiling (0.999) with a perfect explanation. The small penalty on step 2 (`-0.08`) for an imprecise `edit_file` match was recovered by the terminal reward quality.
-
-### Phase 2 Evaluation — What the judges run
-
-In Phase 2, the hackathon judges run a **standard Open LLM agent** (e.g. Nemotron Super 49B) against your environment with no task-specific tuning. Your environment needs to be solvable by a general-purpose agent, not just your own baseline.
-
-**How to simulate Phase 2 locally** — swap `MODEL_NAME` for any model the judge might use:
-
-```bash
-export HF_TOKEN=hf_yourtoken
-export MODEL_NAME=nvidia/Llama-3_1-Nemotron-51B-Instruct   # judge's model
-export ENV_URL=http://localhost:7860
-
-python inference.py
-```
-
-**What makes an environment score well in Phase 2:**
-- The LLM can read the error trace and understand what's wrong (clear `task_description` + authentic traces)
-- The file edit `old_str` is a short, unambiguous, exact-match string (easier for an LLM to quote correctly)
-- After a correct fix, `run_status` flips to `passing` immediately (clear reward signal)
-- The `hint` field (appears after 3 failed runs) guides a stuck agent toward the fix
-- `submit_fix` explanations are scored on depth — a brief explanation still gets partial credit (0.3+)
-
-**Expected Phase 2 score range** (general LLM, no fine-tuning): `0.40 – 0.75` per task depending on model reasoning quality. Our baseline run at **0.935 avg** with Qwen2.5-72B sets a strong upper bound.
 
 ---
 
